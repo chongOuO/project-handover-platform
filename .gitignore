@@ -1,0 +1,41 @@
+# Python overrides
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IntelliJ / PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Databases
+*.sqlite3
+
+# Test coverage
+.coverage
+htmlcov/
