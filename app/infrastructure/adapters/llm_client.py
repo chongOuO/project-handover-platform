@@ -1,15 +1,17 @@
 """AI 語言模型的基礎設施適配器 (Adapter)。
 
-將 LangChain Google Generative AI（Gemini）的呼叫細節封裝於此，
-讓上層的 LangGraph 節點不需直接依賴任何特定的 LLM SDK，
-僅需透過 ``LLMClient.complete()`` 即可取得回應文字。
+支援兩種連線模式：
+1. **直連 Google Gemini**：未設定 ``GEMINI_BASE_URL`` 時使用原生 Google SDK。
+2. **Gemini Balance 代理**：設定 ``GEMINI_BASE_URL`` 時改用 OpenAI 相容介面
+   （``langchain_openai.ChatOpenAI``），將請求路由至自架的 Gemini Balance 服務。
 
 **速率保護**：內建 ``asyncio.Semaphore`` 限制並行呼叫數為 1，
 以及指數退避重試機制（最多 3 次），避免同時觸發 RPM / TPM 限制。
 
 環境變數需求：
-    - ``GOOGLE_API_KEY``: Google Gemini API 金鑰。
+    - ``GOOGLE_API_KEY``: Google Gemini API 金鑰（或 Gemini Balance 的 Bearer Token）。
     - ``LLM_MODEL_NAME``: (選填) 模型名稱，預設為 ``gemini-2.5-flash``。
+    - ``GEMINI_BASE_URL``: (選填) Gemini Balance 代理位址，例如 ``https://example.com``。
 """
 
 from __future__ import annotations
@@ -18,9 +20,9 @@ import asyncio
 import logging
 import os
 
-from google.api_core.client_options import ClientOptions
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from app.domain.exceptions import LLMCallError
 
@@ -105,6 +107,7 @@ class LLMClient:
 
     Attributes:
         _model_name: 使用的語言模型名稱（由環境變數決定）。
+        _base_url: Gemini Balance 代理位址（未設定時直連 Google）。
         _llm: 實際的 LangChain LLM 實例（延遲建立）。
     """
 
@@ -112,13 +115,17 @@ class LLMClient:
         """透過讀取環境變數初始化 LLMClient。"""
         self._model_name: str = os.getenv("LLM_MODEL_NAME", DEFAULT_MODEL_NAME)
         self._base_url: str | None = os.getenv("GEMINI_BASE_URL")
-        self._llm: ChatGoogleGenerativeAI | None = None
+        self._llm: ChatOpenAI | ChatGoogleGenerativeAI | None = None
 
-    def _get_llm(self) -> ChatGoogleGenerativeAI:
+    def _get_llm(self) -> ChatOpenAI | ChatGoogleGenerativeAI:
         """延遲初始化並取得 LLM 實例。
 
+        若 ``GEMINI_BASE_URL`` 已設定，使用 :class:`~langchain_openai.ChatOpenAI`
+        並將 ``base_url`` 指向 Gemini Balance 的 ``/v1`` 端點（OpenAI 相容格式）。
+        否則使用原生 :class:`~langchain_google_genai.ChatGoogleGenerativeAI` 直連 Google。
+
         Returns:
-            已初始化的 :class:`~langchain_google_genai.ChatGoogleGenerativeAI` 實例。
+            已初始化的 LLM 實例。
 
         Raises:
             LLMCallError: 當 ``GOOGLE_API_KEY`` 環境變數未設定時。
@@ -127,21 +134,35 @@ class LLMClient:
             api_key = os.getenv("GOOGLE_API_KEY")
             if not api_key:
                 raise LLMCallError(
-                    detail="環境變數 'GOOGLE_API_KEY' 未設定，無法連線至 Google Gemini。"
+                    detail="環境變數 'GOOGLE_API_KEY' 未設定，無法連線至 LLM。"
                 )
-            
-            kwargs = {}
-            if self._base_url:
-                kwargs["client_options"] = ClientOptions(api_endpoint=self._base_url)
-                kwargs["transport"] = "rest"
 
-            self._llm = ChatGoogleGenerativeAI(
-                model=self._model_name,
-                google_api_key=api_key,
-                temperature=0.3,  # 技術文件需要低溫度確保輸出穩定
-                **kwargs
-            )
-            logger.info("LLMClient 已初始化，使用模型：%s", self._model_name)
+            if self._base_url:
+                # Gemini Balance 代理模式：使用 OpenAI 相容介面
+                base = self._base_url.rstrip("/")
+                openai_base_url = f"{base}/v1"
+                self._llm = ChatOpenAI(
+                    model=self._model_name,
+                    api_key=api_key,
+                    base_url=openai_base_url,
+                    temperature=0.3,
+                )
+                logger.info(
+                    "LLMClient 已初始化（Gemini Balance 代理模式）| 模型：%s | 端點：%s",
+                    self._model_name,
+                    openai_base_url,
+                )
+            else:
+                # 直連 Google Gemini 模式
+                self._llm = ChatGoogleGenerativeAI(
+                    model=self._model_name,
+                    google_api_key=api_key,
+                    temperature=0.3,
+                )
+                logger.info(
+                    "LLMClient 已初始化（Google 直連模式）| 模型：%s",
+                    self._model_name,
+                )
         return self._llm
 
     async def complete(self, prompt: str) -> str:
