@@ -39,3 +39,6 @@ logs/
 # Test coverage
 .coverage
 htmlcov/
+
+# AI Agent
+.agent

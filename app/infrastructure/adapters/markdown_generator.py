@@ -2,14 +2,25 @@
 
 將 :class:`~app.domain.entities.project.ProjectStructure` 轉換為
 適合專案導讀與交接情境、具備高可讀性的 Markdown 文件。
+
+當檔案總 Token 量超過 ``GLOBAL_TOKEN_BUDGET`` 時，透過
+:class:`~app.infrastructure.adapters.content_compressor.ContentCompressor`
+進行智慧壓縮，確保 LLM 上下文不會爆量。
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from app.domain.entities.project import ProjectFile, ProjectStructure
+from app.infrastructure.adapters.content_compressor import (
+    CompressionResult,
+    ContentCompressor,
+)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Token 門檻值設定 (概略估算值)
@@ -18,15 +29,19 @@ from app.domain.entities.project import ProjectFile, ProjectStructure
 #: 當檔案估算的 Token 數量超過此上限時，將會被截斷。
 TOKEN_LIMIT: int = 2_000
 
-#: 用於將單詞數量轉換為大致 Token 數的乘數。
-TOKENS_PER_WORD: float = 1.3
+#: 全域 Markdown 報告的 Token 預算上限。
+#: 此數值為了配合 250k TPM 限制，設為 90,000 以容納兩次並行節點序列執行。
+GLOBAL_TOKEN_BUDGET: int = 90_000
+
+#: Token 估算常數：基於字元數的探測法，對 Gemini 而言較精準 (1 Token 約 3.5 字元)。
+_CHARS_PER_TOKEN: float = 3.5
 
 
 def _estimate_tokens(text: str) -> int:
     """估算 *text* 所佔用的 LLM Token 數量。
 
-    使用一個簡單基於單字數量的探測法 (``單字數 × 1.3``)，這個方法
-    既快速又無需額外依賴套件，非常適合用來做為是否截斷的依據。
+    使用基於字元數量的探測法 (``字元數 / 3.5``)，此方法對包含中文或程式碼
+    等沒有明顯空白分隔的文本更為精確。
 
     Args:
         text: 欲估算的文字內容。
@@ -34,13 +49,11 @@ def _estimate_tokens(text: str) -> int:
     Returns:
         估算的 Token 數量 (整數)。
     """
-    return int(len(text.split()) * TOKENS_PER_WORD)
+    return int(len(text) / _CHARS_PER_TOKEN)
 
 
 def _truncate_content(content: str, limit: int = TOKEN_LIMIT) -> tuple[str, bool]:
     """截斷 *content* 以確保其估算的 Token 數量不超過 *limit*。
-
-    此函式會在單字邊界上進行截斷，以避免將單一 Token 從中切斷。
 
     Args:
         content: 完整的原始檔內容。
@@ -54,15 +67,16 @@ def _truncate_content(content: str, limit: int = TOKEN_LIMIT) -> tuple[str, bool
     if estimated <= limit:
         return content, False
 
-    words = content.split()
-    # 概略計算能夠容納於限制內的單字數量
-    target_words = int(limit / TOKENS_PER_WORD)
-    truncated = " ".join(words[:target_words])
+    target_chars = int(limit * _CHARS_PER_TOKEN)
+    truncated = content[:target_chars]
     return truncated, True
 
 
 class MarkdownGenerator:
     """由 :class:`ProjectStructure` 物件產出結構化的 Markdown 報告。
+
+    整合 :class:`ContentCompressor`，當檔案總量超過全域 Token 預算時
+    自動壓縮，確保最終送入 LLM 的文本量可控。
 
     輸出的文件將遵循以下排版架構：
 
@@ -83,10 +97,38 @@ class MarkdownGenerator:
         ```
 
         … (針對每一個程式碼檔案重複此區塊)
+
+        ---
+        *壓縮統計（僅在壓縮觸發時出現）*
+
+    Args:
+        token_budget: 全域 Token 預算上限，預設使用 ``GLOBAL_TOKEN_BUDGET``。
     """
+
+    def __init__(self, token_budget: Optional[int] = None) -> None:
+        """初始化 MarkdownGenerator。
+
+        Args:
+            token_budget: 可選的自訂 Token 預算。若為 ``None`` 則使用全域預設值。
+        """
+        self._token_budget = token_budget or GLOBAL_TOKEN_BUDGET
+        self._compressor = ContentCompressor(token_budget=self._token_budget)
+        self._last_compression_result: Optional[CompressionResult] = None
+
+    @property
+    def last_compression_result(self) -> Optional[CompressionResult]:
+        """取得最近一次 ``generate()`` 的壓縮結果（若有觸發壓縮）。
+
+        Returns:
+            :class:`CompressionResult` 或 ``None``（若未觸發壓縮）。
+        """
+        return self._last_compression_result
 
     def generate(self, structure: ProjectStructure) -> str:
         """產出完整的 Markdown 報告字串。
+
+        若檔案總 Token 超過預算，會自動觸發壓縮流程，
+        並在報告末尾附加壓縮統計區塊。
 
         Args:
             structure: 已經填滿資料的 :class:`ProjectStructure` Domain 實體。
@@ -94,6 +136,22 @@ class MarkdownGenerator:
         Returns:
             一段準備好回傳給 API 呼叫端或寫入磁碟的 UTF-8 Markdown 字串。
         """
+        # ── 壓縮檢查：估算所有檔案的總 Token ──────────────────────────────
+        compression_result = self._compressor.compress(structure.files)
+        self._last_compression_result = compression_result
+
+        # 決定最終使用的檔案列表
+        render_files = compression_result.files
+        is_compressed = len(compression_result.strategies_applied) > 0
+
+        if is_compressed:
+            logger.info(
+                "[MarkdownGenerator] 壓縮已觸發：%d → %d Token（%s）",
+                compression_result.original_token_estimate,
+                compression_result.compressed_token_estimate,
+                ", ".join(compression_result.strategies_applied),
+            )
+
         sections: List[str] = []
 
         # ── 標題 (Header) ──────────────────────────────────────────────────
@@ -114,13 +172,17 @@ class MarkdownGenerator:
             f"|------|------|\n"
             f"| ZIP 內檔案總數 | {structure.total_files_in_zip} |\n"
             f"| 已過濾 / 忽略 | {structure.skipped_files} |\n"
-            f"| 包含的程式碼檔案 | {structure.code_file_count} |\n"
+            f"| 包含的程式碼檔案 | {len(render_files)} |\n"
         )
         sections.append("\n---\n")
 
         # ── 程式碼檔案區塊 (Code file sections) ──────────────────────────────
-        for project_file in structure.files:
+        for project_file in render_files:
             sections.append(self._render_file_section(project_file))
+
+        # ── 壓縮統計區塊（僅在壓縮觸發時附加） ──────────────────────────────
+        if is_compressed:
+            sections.append(self._render_compression_stats(compression_result))
 
         return "\n".join(sections)
 
@@ -146,11 +208,41 @@ class MarkdownGenerator:
         if project_file.is_truncated:
             lines.append(
                 "\n<!-- [Content Truncated] "
-                f"— 估算 Token 超過 {TOKEN_LIMIT} 限制 -->"
+                f"— 估算 Token 超過限制 -->"
             )
         lines.append("```\n")
 
         return "\n".join(lines)
+
+    def _render_compression_stats(self, result: CompressionResult) -> str:
+        """渲染壓縮統計區塊。
+
+        Args:
+            result: 壓縮執行結果。
+
+        Returns:
+            Markdown 格式的壓縮統計資訊。
+        """
+        compression_ratio = (
+            (1 - result.compressed_token_estimate / result.original_token_estimate)
+            * 100
+            if result.original_token_estimate > 0
+            else 0
+        )
+
+        return (
+            "\n---\n\n"
+            "## 📊 Token Budget Compression Report\n\n"
+            "| 指標 | 數值 |\n"
+            "|------|------|\n"
+            f"| 原始估算 Token | {result.original_token_estimate:,} |\n"
+            f"| 壓縮後估算 Token | {result.compressed_token_estimate:,} |\n"
+            f"| 壓縮率 | {compression_ratio:.1f}% |\n"
+            f"| 套用策略 | {', '.join(result.strategies_applied)} |\n"
+            f"| AST Skeleton 提取 | {result.files_skeleton_extracted} 個檔案 |\n"
+            f"| 優先級裁減 | {result.files_dropped} 個檔案 |\n"
+            f"| 強制截斷 | {result.files_truncated} 個檔案 |\n"
+        )
 
 
 # ---------------------------------------------------------------------------

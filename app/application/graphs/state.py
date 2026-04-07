@@ -37,4 +37,6 @@ class GraphState(TypedDict, total=False):
     env_guide_content: str
     api_docs_output_path: Optional[str]
     env_guide_output_path: Optional[str]
+    content_token_estimate: int
+    compression_applied: bool
     error: Optional[str]
