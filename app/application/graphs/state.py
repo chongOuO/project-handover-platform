@@ -2,6 +2,10 @@
 
 GraphState 是整個 LangGraph 管線中各節點之間傳遞資料的唯一共享狀態容器，
 採用 ``TypedDict`` 定義以確保型別安全並兼容 LangGraph 的狀態管理機制。
+
+Map-Reduce 相關欄位：
+    - ``map_reduce_summary``: Map-Reduce 完成後產出的精煉技術摘要。
+    - ``use_map_reduce``: 標記管線是否已觸發 Map-Reduce，供下游節點改用摘要作為輸入。
 """
 
 from __future__ import annotations
@@ -26,6 +30,10 @@ class GraphState(TypedDict, total=False):
         env_guide_content: ``generate_env_guide_node`` 生成的環境指南 Markdown。
         api_docs_output_path: ``format_output_node`` 寫入後填入的 API 文件路徑。
         env_guide_output_path: ``format_output_node`` 寫入後填入的環境指南路徑。
+        map_reduce_summary: ``map_reduce_node`` 產出的精煉技術摘要（Map-Reduce 觸發時才有值）。
+        use_map_reduce: 標記管線是否已觸發 Map-Reduce，下游節點依此欄位決定使用摘要或原始內容。
+        content_token_estimate: ``parse_markdown_node`` 估算的 Markdown 全文 Token 數。
+        compression_applied: 標記 Phase 1 是否已套用 ContentCompressor 壓縮。
         error: 任何節點拋出的錯誤訊息字串（供調試用）。
     """
 
@@ -37,6 +45,8 @@ class GraphState(TypedDict, total=False):
     env_guide_content: str
     api_docs_output_path: Optional[str]
     env_guide_output_path: Optional[str]
+    map_reduce_summary: Optional[str]
+    use_map_reduce: bool
     content_token_estimate: int
     compression_applied: bool
     error: Optional[str]

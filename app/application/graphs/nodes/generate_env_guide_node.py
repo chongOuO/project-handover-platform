@@ -1,12 +1,17 @@
 """LangGraph 節點 3：AI 生成環境建置指南。
 
-讀取 ``markdown_content`` 並構建專注於開發環境架設的 Prompt，
+讀取 ``markdown_content``（或 Map-Reduce 精煉摘要）並構建專注於開發環境架設的 Prompt，
 呼叫 :class:`~app.infrastructure.adapters.llm_client.LLMClient`
 生成一份開發者可直接跟著操作的環境建置指南 Markdown 文件。
 
-**Token Budget Gate**：在送入 LLM 之前，檢查 ``content_token_estimate``，
-若超過 TPM 安全上限則執行緊急截斷，確保不觸發 API 限制。
+**Map-Reduce 模式**：若上游 ``map_reduce_node`` 已觸發 Map-Reduce，
+改用 ``map_reduce_summary``（已包含全部內容的精煉摘要）作為 Prompt 輸入，
+確保 LLM 能看到全局將而非被截斷的內容。
+
+**Token Budget Gate**：小型專案（未觸發 Map-Reduce）仍檢查 ``content_token_estimate``，
+超限時執行緊急截斷，確保不觸發 TPM 限制。
 """
+
 
 from __future__ import annotations
 
@@ -88,18 +93,12 @@ def _emergency_truncate(content: str, token_limit: int) -> str:
 async def generate_env_guide_node(state: GraphState) -> GraphState:
     """呼叫 LLM 分析原始碼並生成環境建置指南。
 
-    **邏輯重點**：此節點是 LLM 的第二次呼叫，與 API 文件節點完全並行設計
-    （在 Graph 中可同時觸發兩者），專注於環境架設流程與 DevOps 細節。
-
-    **Token Budget Gate**：在組裝 Prompt 前，檢查 ``content_token_estimate``。
-    若估算值超過 ``_TPM_SAFE_INPUT_LIMIT``（200k Token），對 ``markdown_content``
-    執行緊急截斷，確保單次 API 呼叫不觸發 TPM 限制。
-
-    Prompt 強調「可操作性」，要求輸出 Shell 指令和驗證步驟，
-    確保文件對剛接手的開發者真正有用。
+    **邏輯重點**：若上游 ``map_reduce_node`` 已觸發 Map-Reduce，
+    改用 ``map_reduce_summary``（精煉摘要）作為 Prompt 輸入；
+    否則使用原始 ``markdown_content`` 並保留緊急截斷作為最後防線。
 
     Args:
-        state: 需包含 ``markdown_content``（由 parse_markdown_node 填入）。
+        state: 需包含 ``markdown_content`` 或 ``map_reduce_summary``。
 
     Returns:
         更新後的 :class:`~app.application.graphs.state.GraphState`，
@@ -107,25 +106,33 @@ async def generate_env_guide_node(state: GraphState) -> GraphState:
     """
     logger.info("[generate_env_guide_node] 開始生成環境建置指南...")
 
-    markdown_content = state["markdown_content"]
-    token_estimate = state.get("content_token_estimate", _estimate_tokens(markdown_content))
+    use_map_reduce: bool = state.get("use_map_reduce", False)
 
-    # Token Budget Gate：緊急截斷
-    if token_estimate > _TPM_SAFE_INPUT_LIMIT:
-        logger.warning(
-            "[generate_env_guide_node] Token 估算 %d 超過安全上限 %d，執行緊急截斷。",
-            token_estimate,
-            _TPM_SAFE_INPUT_LIMIT,
-        )
-        markdown_content = _emergency_truncate(markdown_content, _TPM_SAFE_INPUT_LIMIT)
+    if use_map_reduce:
+        # Map-Reduce 模式：使用精煉摘要，無需截斷
+        content = state["map_reduce_summary"]
         logger.info(
-            "[generate_env_guide_node] 緊急截斷後 Token 估算：%d",
-            _estimate_tokens(markdown_content),
+            "[generate_env_guide_node] 使用 Map-Reduce 精煉摘要（%d 字元）作為輸入。",
+            len(content),
         )
+    else:
+        # 標準模式：使用原始 Markdown，保留緊急截斷作為最後防線
+        content = state["markdown_content"]
+        token_estimate = state.get("content_token_estimate", _estimate_tokens(content))
 
-    prompt = _ENV_GUIDE_PROMPT_TEMPLATE.format(
-        markdown_content=markdown_content
-    )
+        if token_estimate > _TPM_SAFE_INPUT_LIMIT:
+            logger.warning(
+                "[generate_env_guide_node] Token 估算 %d 超過安全上限 %d，執行緊急截斷。",
+                token_estimate,
+                _TPM_SAFE_INPUT_LIMIT,
+            )
+            content = _emergency_truncate(content, _TPM_SAFE_INPUT_LIMIT)
+            logger.info(
+                "[generate_env_guide_node] 緊急截斷後 Token 估算：%d",
+                _estimate_tokens(content),
+            )
+
+    prompt = _ENV_GUIDE_PROMPT_TEMPLATE.format(markdown_content=content)
     env_guide = await _llm.complete(prompt)
 
     logger.info("[generate_env_guide_node] 完成，輸出長度：%d 字元", len(env_guide))

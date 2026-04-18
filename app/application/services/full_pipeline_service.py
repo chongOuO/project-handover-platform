@@ -18,6 +18,7 @@ from pathlib import Path
 from app.application.graphs.ai_analysis_graph import build_graph
 from app.application.services.project_analysis_service import ProjectAnalysisService
 from app.domain.entities.ai_report import AIReport, AnalysisSection, SectionType
+from app.infrastructure.adapters.file_filter import FilterMode
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,12 @@ class FullPipelineService:
             LLMCallError: Gemini API 呼叫失敗。
         """
         # ── Phase 1：ZIP → ProjectStructure → Markdown 字串 ───────────────────
-        logger.info("[FullPipeline] Phase 1 啟動：%s", filename)
-        structure = await self._phase1.analyze(zip_bytes=zip_bytes, filename=filename)
+        logger.info("[FullPipeline] Phase 1 啟動：%s（過濾模式：API_DOCS）", filename)
+        structure = await self._phase1.analyze(
+            zip_bytes=zip_bytes,
+            filename=filename,
+            filter_mode=FilterMode.API_DOCS,
+        )
         markdown_content = self._phase1.render_markdown(structure)
         project_name = structure.project_name
         logger.info(

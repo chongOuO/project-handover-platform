@@ -1,13 +1,15 @@
 """LangGraph AI 分析管線的主圖定義 (Graph Builder)。
 
 此模組建構並編譯整個 LangGraph ``StateGraph``，
-串聯四個處理節點以形成從「讀取 Markdown」到「輸出兩份文件」的完整 AI 分析管線。
+串聯五個處理節點以形成從「讀取 Markdown」到「輸出兩份文件」的完整 AI 分析管線。
 
 管線拓撲（DAG）：
 
     START
       │
     parse_markdown_node         ← 讀取 .md 來源文件
+      │
+    map_reduce_node             ← 大型專案 Map-Reduce 分批摘要（小型專案 passthrough）
       │
     ├─ generate_api_docs_node   ← 並行分支 1：生成 API 文件
     └─ generate_env_guide_node  ← 並行分支 2：生成環境指南
@@ -17,6 +19,7 @@
              END
 """
 
+
 from __future__ import annotations
 
 import logging
@@ -25,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.application.graphs.state import GraphState
 from app.application.graphs.nodes.parse_markdown_node import parse_markdown_node
+from app.application.graphs.nodes.map_reduce_node import map_reduce_node
 from app.application.graphs.nodes.generate_api_docs_node import generate_api_docs_node
 from app.application.graphs.nodes.generate_env_guide_node import generate_env_guide_node
 from app.application.graphs.nodes.format_output_node import format_output_node
@@ -37,13 +41,14 @@ def build_graph() -> StateGraph:
 
     **邏輯重點**：圖的拓撲採用「先串後分再合」的結構：
     - ``parse_markdown_node`` 是唯一的 I/O 入口，必須最先完成。
+    - ``map_reduce_node`` 接於 parse 後：小型專案 passthrough，
+      大型專案執行 Map-Reduce 分批摘要，確保下游節點收到完整資訊。
     - ``generate_api_docs_node`` 與 ``generate_env_guide_node`` 在概念上可並行
-      （兩者都只依賴 ``markdown_content``，互不依賴），達到高效生成。
-    - ``format_output_node`` 作為最終匯合點，等兩個 AI 節點都完成後，
-      負責寫出兩份完全獨立的 Markdown 文件。
+      （兩者都只依賴 ``markdown_content`` / ``map_reduce_summary``，互不依賴）。
+    - ``format_output_node`` 作為最終匯合點。
 
     Returns:
-        已編譯完成的 LangGraph 可執行圖實例，可直接呼叫 ``ainvoke()`` 執行。
+        已編譯完成的 LangGraph 可執行圖實例。
 
     Example::
 
@@ -60,6 +65,7 @@ def build_graph() -> StateGraph:
 
     # ── 節點註冊 ──────────────────────────────────────────────────────────────
     builder.add_node("parse_markdown", parse_markdown_node)
+    builder.add_node("map_reduce", map_reduce_node)
     builder.add_node("generate_api_docs", generate_api_docs_node)
     builder.add_node("generate_env_guide", generate_env_guide_node)
     builder.add_node("format_output", format_output_node)
@@ -67,9 +73,12 @@ def build_graph() -> StateGraph:
     # ── 邊的連接（有向邊，定義執行順序）───────────────────────────────────────
     builder.add_edge(START, "parse_markdown")
 
-    # parse_markdown 完成後同時觸發兩個 AI 生成節點
-    builder.add_edge("parse_markdown", "generate_api_docs")
-    builder.add_edge("parse_markdown", "generate_env_guide")
+    # parse_markdown 完成後進入 map_reduce 待機
+    builder.add_edge("parse_markdown", "map_reduce")
+
+    # map_reduce 完成後同時觸發兩個 AI 生成節點
+    builder.add_edge("map_reduce", "generate_api_docs")
+    builder.add_edge("map_reduce", "generate_env_guide")
 
     # 兩個生成節點完成後才進入最終輸出節點
     builder.add_edge("generate_api_docs", "format_output")

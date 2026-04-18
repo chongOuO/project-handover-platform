@@ -16,7 +16,7 @@ from typing import List
 
 from app.domain.entities.project import ProjectFile, ProjectStructure
 from app.domain.exceptions import EmptyProjectError, FileSizeLimitExceededError
-from app.infrastructure.adapters.file_filter import FileFilter
+from app.infrastructure.adapters.file_filter import FileFilter, FilterMode
 from app.infrastructure.adapters.markdown_generator import (
     MarkdownGenerator,
     TOKEN_LIMIT,
@@ -52,12 +52,20 @@ class ProjectAnalysisService:
         self._filter = FileFilter()
         self._generator = MarkdownGenerator()
 
-    async def analyze(self, zip_bytes: bytes, filename: str) -> ProjectStructure:
+    async def analyze(
+        self,
+        zip_bytes: bytes,
+        filename: str,
+        filter_mode: FilterMode = FilterMode.DEFAULT,
+    ) -> ProjectStructure:
         """執行 Phase-1 完整的分析管線。
 
         Args:
             zip_bytes: 上傳的 ZIP 檔案之原始位元組資料。
             filename: 上傳時的原始檔名 (例如：``"my_project.zip"``)。
+            filter_mode: 檔案過濾模式，預設為 ``FilterMode.DEFAULT``（納入所有原始碼）。
+                傳入 ``FilterMode.API_DOCS`` 可額外排除前端相關檔案，提升
+                API 文件生成的信號品質。
 
         Returns:
             一個已經填好資料的 :class:`~app.domain.entities.project.ProjectStructure`
@@ -87,8 +95,8 @@ class ProjectAnalysisService:
             repo = ProjectRepository(root_dir=tmp_dir)
             all_disk_files = await repo.list_files()
 
-            accepted_paths: List[str] = [
-                p for p in all_disk_files if self._filter.is_accepted(p)
+            accepted_paths: list[str] = [
+                p for p in all_disk_files if self._filter.is_accepted(p, mode=filter_mode)
             ]
             skipped = len(all_disk_files) - len(accepted_paths)
 
