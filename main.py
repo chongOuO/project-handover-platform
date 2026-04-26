@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager, suppress
 from dotenv import load_dotenv
 
 # 在應用程式最早期載入 .env，確保後續模組的 import 和初始化能讀到環境變數
@@ -21,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.middleware.exception_handler import register_exception_handlers
 from app.api.routers.project_router import router as project_router
 from app.api.routers.diagram_router import router as diagram_router
+from app.api.routers.qa_router import router as qa_router, set_session_store
+from app.infrastructure.adapters.session_store import InMemorySessionStore, run_cleanup_loop
 
 # ---------------------------------------------------------------------------
 # 全域日誌配置 (Logging configuration)
@@ -34,10 +38,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# lifespan：Session Store 建立 + 背景清理任務
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan context manager。
+
+    啟動時：建立 InMemorySessionStore 單例並將其注入 qa_router，
+    同時啟動背景 asyncio.Task 定期清理過期 Session。
+    關閉時：取消背景 Task。
+    """
+    session_store = InMemorySessionStore()
+    set_session_store(session_store)
+    logger.info("[lifespan] InMemorySessionStore 已初始化。")
+
+    cleanup_task = asyncio.create_task(run_cleanup_loop(session_store))
+    logger.info("[lifespan] Session 背景清理任務已啟動。")
+
+    yield  # 應用程式運行中
+
+    cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await cleanup_task
+    logger.info("[lifespan] Session 背景清理任務已關閉。")
+
+
+# ---------------------------------------------------------------------------
 # 建置 FastAPI 執行實體本身
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
+    lifespan=lifespan,
     title="專案自動導讀及快速交接平台",
     description=(
         "這套自動化後台建置系統允許透過上傳一段具有原始碼架構的軟體開發目錄壓縮包 (Zipped files)。"
@@ -73,6 +105,7 @@ register_exception_handlers(app)
 
 app.include_router(project_router)
 app.include_router(diagram_router)
+app.include_router(qa_router)
 
 
 # ---------------------------------------------------------------------------

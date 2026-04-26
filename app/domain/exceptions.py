@@ -151,3 +151,45 @@ class LLMCallError(AppBaseException):
             status_code=502,
             detail=detail,
         )
+
+
+class SessionNotFoundError(AppBaseException):
+    """當查詢的 Q&A Session 不存在時拋出。
+
+    可能原因：Session ID 錯誤，或 Session 從未建立。
+    """
+
+    def __init__(self, session_id: str, detail: Optional[str] = None) -> None:
+        """初始化 SessionNotFoundError。
+
+        Args:
+            session_id: 查詢的 Session 識別碼。
+            detail: 選擇性的額外上下文。
+        """
+        super().__init__(
+            error_code="SESSION_NOT_FOUND",
+            message=f"找不到 Session '{session_id}'，可能已過期或從未建立。",
+            status_code=404,
+            detail=detail,
+        )
+
+
+class SessionExpiredError(AppBaseException):
+    """當查詢的 Q&A Session 已過期時拋出。
+
+    Session 預設有效期限為 30 分鐘，過期後需重新上傳專案建立新的 Session。
+    """
+
+    def __init__(self, session_id: str, detail: Optional[str] = None) -> None:
+        """初始化 SessionExpiredError。
+
+        Args:
+            session_id: 已過期的 Session 識別碼。
+            detail: 選擇性的額外上下文。
+        """
+        super().__init__(
+            error_code="SESSION_EXPIRED",
+            message=f"Session '{session_id}' 已過期，請重新上傳專案建立新的 Session。",
+            status_code=410,
+            detail=detail,
+        )
