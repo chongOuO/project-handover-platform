@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.middleware.exception_handler import register_exception_handlers
 from app.api.routers.project_router import router as project_router
 from app.api.routers.diagram_router import router as diagram_router
+from app.api.routers.dockerfile_router import router as dockerfile_router
 from app.api.routers.qa_router import router as qa_router, set_session_store
 from app.infrastructure.adapters.session_store import InMemorySessionStore, run_cleanup_loop
 
@@ -105,6 +106,7 @@ register_exception_handlers(app)
 
 app.include_router(project_router)
 app.include_router(diagram_router)
+app.include_router(dockerfile_router)
 app.include_router(qa_router)
 
 
